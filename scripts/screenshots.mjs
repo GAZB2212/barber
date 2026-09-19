@@ -40,5 +40,19 @@ await page.getByRole('link', { name: 'Manage this booking' }).click()
 await page.waitForTimeout(800)
 await page.screenshot({ path: `${OUT}/8-manage.png`, fullPage: true })
 
+// Dashboard
+await page.goto(`${BASE}/admin`)
+await page.screenshot({ path: `${OUT}/9-diary.png`, fullPage: true })
+
+await page.getByRole('button', { name: 'Book someone in' }).click()
+await page.waitForTimeout(300)
+await page.screenshot({ path: `${OUT}/10-walk-in.png`, fullPage: true })
+
+await page.goto(`${BASE}/admin/services`)
+await page.screenshot({ path: `${OUT}/11-services.png`, fullPage: true })
+
+await page.goto(`${BASE}/admin/settings`)
+await page.screenshot({ path: `${OUT}/12-settings.png`, fullPage: true })
+
 await browser.close()
 console.log('shots done')

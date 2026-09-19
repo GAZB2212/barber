@@ -1,5 +1,6 @@
+import { TZDate } from '@date-fns/tz'
 import type { Barber, Service, Shop } from '@/lib/types'
-import type { Interval, OpeningWindow } from '@/lib/availability'
+import { localDateOf, type Interval, type OpeningWindow } from '@/lib/availability'
 
 /**
  * A self-contained demo shop.
@@ -103,20 +104,104 @@ export const demoOpeningHours: Record<string, OpeningWindow[]> = {
  * not inherit bookings from the last one. The key is an opaque session cookie
  * set by middleware.
  */
-type DemoBooking = {
+export type DemoBooking = {
   token: string
   barberId: string
   startsAt: Date
   endsAt: Date
-  status: 'confirmed' | 'cancelled'
+  status: 'confirmed' | 'cancelled' | 'completed' | 'no_show'
   name: string
+  phone: string | null
+  note: string | null
   services: { name: string; pricePence: number; durationMinutes: number }[]
 }
 
-const sessions = new Map<string, Map<string, DemoBooking>>()
+/**
+ * Held on `globalThis`, not in a module-level `const`.
+ *
+ * Next.js bundles Server Actions separately from Server Component rendering,
+ * so a plain module-level Map is instantiated twice in production: an action
+ * writes to one copy and the page reads the other, and every change silently
+ * vanishes. It also survives hot reloads in development.
+ */
+export type DemoTimeOff = {
+  id: string
+  barberId: string
+  start: Date
+  end: Date
+  reason: string | null
+}
 
-/** Cap the number of live demo sessions so a long-running process cannot grow forever. */
+const store = ((globalThis as typeof globalThis & {
+  __chairtimeDemo?: {
+    sessions: Map<string, Map<string, DemoBooking>>
+    timeOff: Map<string, DemoTimeOff[]>
+  }
+}).__chairtimeDemo ??= { sessions: new Map(), timeOff: new Map() })
+
+const sessions = store.sessions
+
+/** Cap live demo sessions so a long-running process cannot grow forever. */
 const MAX_SESSIONS = 500
+
+/**
+ * Pre-filled appointments, so a barber opening the diary sees a realistic day
+ * rather than an empty grid. Generated relative to today and keyed by session
+ * so they stay stable for one visitor.
+ */
+/**
+ * An instant at `hour` o'clock, `dayOffset` days from today, in the demo
+ * shop's timezone.
+ *
+ * `Date#setHours` would use the *server's* timezone, which on a UTC host puts
+ * every seeded appointment an hour out for a London shop in summer.
+ */
+function shopLocal(dayOffset: number, hour: number): Date {
+  const today = localDateOf(new Date(), demoShop.timezone)
+  const [year, month, day] = today.split('-').map(Number)
+  return new Date(
+    new TZDate(year, month - 1, day + dayOffset, hour, 0, 0, 0, demoShop.timezone).getTime(),
+  )
+}
+
+function seedFor(sessionId: string): DemoBooking[] {
+  // Long enough not to repeat a name within a day's seeded appointments.
+  const names = [
+    'Tom Whelan', 'Ryan P.', 'Danny Okoro', 'Alex Reid', 'Sam Curtis',
+    'Joe Mannion', 'Chris Bale', 'Mo Farah-Jones', 'Nathan Hurst', 'Leo Sant',
+    'Kieran Duff', 'Owen Pryce', 'Jamal Rees', 'Stu Hargreaves', 'Ben Nowak',
+    'Callum Ford', 'Dev Anand', 'Pete Salisbury', 'Ash Whitmore', 'Rob Deane',
+  ]
+  const cuts = [
+    { name: 'Skin fade', pricePence: 2500, durationMinutes: 45 },
+    { name: 'Classic cut', pricePence: 1800, durationMinutes: 30 },
+    { name: 'Beard trim', pricePence: 1200, durationMinutes: 20 },
+  ]
+  const seeded: DemoBooking[] = []
+  let n = 0
+  for (const [index, barber] of demoBarbers.entries()) {
+    const offsets = index === 0 ? [0, 1, 2, 4] : index === 1 ? [0, 1, 3] : [0, 2]
+    for (const dayOffset of offsets) {
+      for (const hour of [10, 15]) {
+        const start = shopLocal(dayOffset, hour)
+        const cut = cuts[n % cuts.length]
+        seeded.push({
+          token: `seed-${sessionId}-${barber.id}-${dayOffset}-${hour}`,
+          barberId: barber.id,
+          startsAt: start,
+          endsAt: new Date(start.getTime() + 45 * 60_000),
+          status: 'confirmed',
+          name: names[n % names.length],
+          phone: null,
+          note: null,
+          services: [cut],
+        })
+        n += 1
+      }
+    }
+  }
+  return seeded
+}
 
 function bookingsFor(sessionId: string): Map<string, DemoBooking> {
   let bookings = sessions.get(sessionId)
@@ -126,53 +211,83 @@ function bookingsFor(sessionId: string): Map<string, DemoBooking> {
       const oldest = sessions.keys().next().value
       if (oldest) sessions.delete(oldest)
     }
-    bookings = new Map()
+    bookings = new Map(seedFor(sessionId).map((booking) => [booking.token, booking]))
     sessions.set(sessionId, bookings)
   }
   return bookings
 }
 
-export function demoBusyFor(sessionId: string, barberId: string): Interval[] {
-  const live = [...bookingsFor(sessionId).values()]
-    .filter((b) => b.barberId === barberId && b.status === 'confirmed')
-    .map((b) => ({ start: b.startsAt, end: b.endsAt }))
-
-  // A few pre-filled appointments so the grid never looks suspiciously empty.
-  const seeded: Interval[] = []
-  const now = new Date()
-  const seedOffsets = barberId === demoBarbers[0].id ? [1, 2, 4] : [1, 3]
-  for (const dayOffset of seedOffsets) {
-    for (const hour of [10, 15]) {
-      const start = new Date(now)
-      start.setDate(start.getDate() + dayOffset)
-      start.setHours(hour, 0, 0, 0)
-      seeded.push({ start, end: new Date(start.getTime() + 45 * 60_000) })
-    }
-  }
-  return [...seeded, ...live]
+/** Every appointment for a session, seeded and booked alike. */
+export function demoAppointments(sessionId: string): DemoBooking[] {
+  return [...bookingsFor(sessionId).values()]
+    .sort((a, b) => a.startsAt.getTime() - b.startsAt.getTime())
 }
 
-export function addDemoBooking(sessionId: string, booking: Omit<DemoBooking, 'status'>): boolean {
+/** Barber absences booked from the dashboard. */
+export function demoTimeOff(sessionId: string): DemoTimeOff[] {
+  return store.timeOff.get(sessionId) ?? []
+}
+
+export function addDemoTimeOff(
+  sessionId: string,
+  entry: { barberId: string; start: Date; end: Date; reason: string | null },
+) {
+  const list = store.timeOff.get(sessionId) ?? []
+  list.push({ ...entry, id: crypto.randomUUID() })
+  store.timeOff.set(sessionId, list)
+}
+
+export function removeDemoTimeOff(sessionId: string, id: string) {
+  store.timeOff.set(sessionId, demoTimeOff(sessionId).filter((entry) => entry.id !== id))
+}
+
+export function demoBusyFor(sessionId: string, barberId: string): Interval[] {
+  const booked = bookingsFor(sessionId)
+  const live = [...booked.values()]
+    .filter((b) => b.barberId === barberId && (b.status === 'confirmed' || b.status === 'completed'))
+    .map((b) => ({ start: b.startsAt, end: b.endsAt }))
+
+  const absences = demoTimeOff(sessionId)
+    .filter((entry) => entry.barberId === barberId)
+    .map((entry) => ({ start: entry.start, end: entry.end }))
+
+  return [...live, ...absences]
+}
+
+export function addDemoBooking(
+  sessionId: string,
+  booking: Omit<DemoBooking, 'status' | 'phone' | 'note'> &
+    Partial<Pick<DemoBooking, 'phone' | 'note'>>,
+): boolean {
   const bookings = bookingsFor(sessionId)
-  // Mirror the database’s exclusion constraint.
+  // Mirror the database's exclusion constraint.
   const clash = [...bookings.values()].some(
     (existing) =>
-      existing.status === 'confirmed' &&
+      (existing.status === 'confirmed' || existing.status === 'completed') &&
       existing.barberId === booking.barberId &&
       existing.startsAt < booking.endsAt &&
       existing.endsAt > booking.startsAt,
   )
   if (clash) return false
-  bookings.set(booking.token, { ...booking, status: 'confirmed' })
+  bookings.set(booking.token, {
+    phone: null, note: null, ...booking, status: 'confirmed',
+  })
   return true
 }
 
 export const getDemoBooking = (sessionId: string, token: string) =>
   bookingsFor(sessionId).get(token)
 
-export function cancelDemoBooking(sessionId: string, token: string): boolean {
+export function setDemoBookingStatus(
+  sessionId: string,
+  token: string,
+  status: DemoBooking['status'],
+): boolean {
   const booking = bookingsFor(sessionId).get(token)
   if (!booking) return false
-  booking.status = 'cancelled'
+  booking.status = status
   return true
 }
+
+export const cancelDemoBooking = (sessionId: string, token: string) =>
+  setDemoBookingStatus(sessionId, token, 'cancelled')

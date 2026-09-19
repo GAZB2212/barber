@@ -23,10 +23,12 @@ npm install
 npm run dev
 ```
 
-Open <http://localhost:3000/demo>. **No database or keys are needed** — with
-Supabase unconfigured the app serves a built-in demo shop, so you can try the
-whole flow (and show it to a barber) immediately. Demo bookings live in memory,
-scoped per visitor by a cookie, and vanish on restart.
+Open <http://localhost:3000/demo> for the customer site, or
+<http://localhost:3000/admin> for the barber's dashboard. **No database or keys
+are needed** — with Supabase unconfigured the app serves a built-in demo shop
+and signs you into the dashboard as its owner, so you can try both (and show
+them to a barber) immediately. Demo data lives in memory, scoped per visitor by
+a cookie, and vanishes on restart.
 
 To run against a real database, copy `.env.example` to `.env.local`, fill in
 your Supabase credentials, and apply the migrations in `supabase/migrations/`
@@ -53,9 +55,37 @@ src/lib/shop.ts           Loads a tenant and its availability inputs.
 src/lib/booking.ts        Server actions: create and cancel a booking.
 src/lib/theme.ts          Per-shop colours and type, as CSS custom properties.
 src/lib/demo.ts           The keyless demo shop.
+src/lib/auth.ts           Who is signed in, and what they may change.
+src/lib/admin/            Dashboard queries and actions.
 src/app/[shop]/           The public, per-tenant site.
+src/app/admin/            The barber's dashboard.
 supabase/migrations/      Schema, then row-level security.
 ```
+
+### The dashboard
+
+`/admin` is the shop's side: a day-by-day diary with takings and chair time,
+marking appointments done / no-show / cancelled, booking walk-ins from behind
+the chair, blocking out time off, and editing services, team, hours and
+branding.
+
+Walk-ins deliberately ignore lead time, opening hours and the booking horizon —
+if a barber says they will squeeze someone in at 17:50, that is the shop's
+call. Overlap is still refused, by the same exclusion constraint that guards
+customer bookings.
+
+Roles: owners and managers can change configuration; barbers see the diary and
+can block out their own time.
+
+Two things worth knowing if you extend it:
+
+- Everything under `/admin` is `force-dynamic`. These pages are
+  per-signed-in-user, and a build that resolves a session at compile time would
+  otherwise bake one shop's dashboard into static HTML.
+- The demo store lives on `globalThis`, not in a module-level `const`. Next
+  bundles Server Actions separately from Server Component rendering, so a plain
+  module singleton exists twice in production: the action writes to one copy and
+  the page reads the other.
 
 ### The slot engine
 
@@ -89,8 +119,9 @@ raising a price later cannot rewrite what a past customer was charged.
 
 - **Payments and deposits.** Deliberately out of scope for v1; prices are
   display-only and settled in the shop.
-- **Barber admin.** The schema, RLS and staff roles are in place; the
-  dashboard UI is not.
+- **Staff invitations.** Sign-in works, but there is no flow to invite a
+  barber and link their account to a `staff` row — do it in SQL for now.
+- **Week and month views.** The diary is day-by-day only.
 - **Notifications.** The confirmation screen shows the manage link, but no
   email or SMS is sent yet.
 - **Generated database types.** Queries are hand-typed; run
